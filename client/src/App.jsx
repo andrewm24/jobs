@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { api } from "./api.js";
+import { pdf } from "@react-pdf/renderer";
+import ResumePDF from "./ResumePDF.jsx";
 
 /* ============================================================
    JOB OPS — Application Command Center
@@ -169,14 +171,172 @@ function Rail({ status, onSet }) {
   );
 }
 
+/* ---------------- Inbox ---------------- */
+const scoreColor = (s) => (s >= 8 ? "var(--green)" : s >= 6 ? "var(--ink)" : "var(--red)");
+
+function Inbox({ postings, scanBusy, scanSummary, onScan, onAccept, onDismiss }) {
+  return (
+    <div>
+      <div className="jo-card">
+        <div className="jo-card-h">
+          <div style={{ maxWidth: 640 }}>
+            <div className="jo-output-title">Discovery inbox</div>
+            <p className="jo-note">
+              Fresh postings from your watchlist and the SimplifyJobs internship list, ranked by
+              Claude fit score against your profile. Accept moves a posting into your pipeline.
+            </p>
+          </div>
+          <button className="jo-btn accent" disabled={scanBusy} onClick={onScan}>
+            {scanBusy ? <span><span className="jo-spin">◐</span> Scanning…</span> : "Scan Now"}
+          </button>
+        </div>
+        {scanSummary && <p className="jo-note">{scanSummary}</p>}
+      </div>
+
+      {postings.length === 0 ? (
+        <div className="jo-empty">
+          <div className="jo-empty-h">Inbox zero</div>
+          <p>Run a scan to pull fresh postings. Add companies in the Sources tab to widen the net.</p>
+        </div>
+      ) : (
+        postings.map((p) => (
+          <div className="jo-card" key={p.id}>
+            <div className="jo-card-h">
+              <div>
+                <div className="jo-company">{p.company}</div>
+                <div className="jo-role">{p.title}{p.location ? ` · ${p.location}` : ""}</div>
+                {p.reason && <p className="jo-note">{p.reason}</p>}
+              </div>
+              <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                {p.score != null
+                  ? <span className="jo-badge" style={{ color: scoreColor(p.score), borderColor: scoreColor(p.score) }}>Fit {p.score}/10</span>
+                  : <span className="jo-badge">Unscored</span>}
+                <span className="jo-badge">{p.source}</span>
+              </div>
+            </div>
+            <div className="jo-row">
+              <button className="jo-btn sm accent" onClick={() => onAccept(p)}>Accept → Pipeline</button>
+              <button className="jo-btn sm ghost" onClick={() => onDismiss(p)}>Dismiss</button>
+              {p.url && (
+                <a className="jo-btn sm ghost" style={{ textDecoration: "none", display: "inline-flex", alignItems: "center" }}
+                  href={p.url} target="_blank" rel="noreferrer">View Posting ↗</a>
+              )}
+            </div>
+          </div>
+        ))
+      )}
+    </div>
+  );
+}
+
+/* ---------------- Sources ---------------- */
+function Sources({ companies, settings, onAddCompany, onToggleCompany, onDeleteCompany, onSaveSettings }) {
+  const [name, setName] = useState("");
+  const [ats, setAts] = useState("greenhouse");
+  const [slug, setSlug] = useState("");
+  const [local, setLocal] = useState(settings);
+  const [flash, setFlash] = useState(false);
+  useEffect(() => setLocal(settings), [settings]);
+
+  const set = (key) => (e) => setLocal((l) => ({ ...l, [key]: e.target.value }));
+  const submit = () => {
+    if (!name.trim() || !slug.trim()) return;
+    onAddCompany({ name: name.trim(), ats, slug: slug.trim() });
+    setName(""); setSlug("");
+  };
+  const save = async () => {
+    await onSaveSettings(local);
+    setFlash(true);
+    setTimeout(() => setFlash(false), 1600);
+  };
+
+  return (
+    <div>
+      <div className="jo-card">
+        <div className="jo-output-title">Company watchlist</div>
+        <p className="jo-note">
+          Polled directly from each company's public ATS job board. The slug is the board name in
+          the URL — greenhouse: boards.greenhouse.io/&lt;slug&gt; · lever: jobs.lever.co/&lt;slug&gt; ·
+          ashby: jobs.ashbyhq.com/&lt;slug&gt;. The SimplifyJobs GitHub list is always scanned, so an
+          empty watchlist still finds internships.
+        </p>
+        {companies.map((c) => (
+          <div key={c.id} className="jo-row" style={{ alignItems: "center", justifyContent: "space-between", opacity: c.active ? 1 : 0.5 }}>
+            <span>
+              <strong>{c.name}</strong>{" "}
+              <span className="jo-badge">{c.ats}</span>{" "}
+              <span className="jo-note" style={{ display: "inline" }}>{c.slug}</span>
+            </span>
+            <span style={{ display: "flex", gap: 6 }}>
+              <button className="jo-btn sm ghost" onClick={() => onToggleCompany(c)}>{c.active ? "Pause" : "Resume"}</button>
+              <button className="jo-btn sm danger" onClick={() => onDeleteCompany(c.id)}>Remove</button>
+            </span>
+          </div>
+        ))}
+        <label className="jo-label">Add company</label>
+        <div className="jo-row" style={{ marginTop: 0 }}>
+          <input className="jo-input" style={{ flex: 2, minWidth: 140 }} value={name} onChange={(e) => setName(e.target.value)} placeholder="Company name" />
+          <select className="jo-input" style={{ flex: 1, minWidth: 130 }} value={ats} onChange={(e) => setAts(e.target.value)}>
+            <option value="greenhouse">Greenhouse</option>
+            <option value="lever">Lever</option>
+            <option value="ashby">Ashby</option>
+          </select>
+          <input className="jo-input" style={{ flex: 2, minWidth: 140 }} value={slug} onChange={(e) => setSlug(e.target.value)} placeholder="board slug" />
+          <button className="jo-btn" disabled={!name.trim() || !slug.trim()} onClick={submit}>Add</button>
+        </div>
+      </div>
+
+      <div className="jo-card">
+        <div className="jo-output-title">Discovery settings</div>
+        <label className="jo-label">Title must contain one of (comma-separated)</label>
+        <input className="jo-input" value={local.include_keywords ?? ""} onChange={set("include_keywords")} placeholder="intern, co-op" />
+        <label className="jo-label">Exclude titles containing</label>
+        <input className="jo-input" value={local.exclude_keywords ?? ""} onChange={set("exclude_keywords")} placeholder="unpaid, senior, staff, phd" />
+        <label className="jo-label">Locations (comma-separated · blank = anywhere · remote always passes)</label>
+        <input className="jo-input" value={local.locations ?? ""} onChange={set("locations")} placeholder="e.g. Maryland, Washington DC, New York" />
+        <label className="jo-label">Minimum fit score to surface (0–10)</label>
+        <input className="jo-input" value={local.min_score ?? ""} onChange={set("min_score")} placeholder="6" />
+        <label className="jo-label">GitHub list lookback (days)</label>
+        <input className="jo-input" value={local.github_days ?? ""} onChange={set("github_days")} placeholder="14" />
+        <div className="jo-row" style={{ alignItems: "center" }}>
+          <button className="jo-btn" onClick={save}>Save Settings</button>
+          {flash && <span className="jo-saved-flash">✓ Saved</span>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ---------------- Job Detail ---------------- */
 function JobDetail({ job, profile, onUpdate, onDelete, onBack }) {
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
+  const [chatBusy, setChatBusy] = useState(false);
+  const [chatMsg, setChatMsg] = useState("");
+
+  const handleChat = async () => {
+    if (!chatMsg.trim()) return;
+    setChatBusy(true);
+    const msg = chatMsg.trim();
+    setChatMsg("");
+    try {
+      const newHistory = await api.sendChat(job.id, msg);
+      onUpdate({ ...job, ai: { ...job.ai, chat: newHistory } }, { persisted: true });
+    } catch(e) {
+      alert("Chat failed: " + e.message);
+    }
+    setChatBusy(false);
+  };
+
+  const outputText = (v) => (typeof v === "string" ? v : JSON.stringify(v, null, 2));
 
   const runAI = async (kind) => {
-    if (!profile.trim()) {
+    if (!profile?.text?.trim()) {
       alert("Add your background in the Profile tab first — the AI needs it to tailor output.");
+      return;
+    }
+    if (kind === "tailor" && !(profile.json_data && Object.keys(profile.json_data).length)) {
+      alert("Generate the structured resume first (Profile tab → Generate Structured Resume) — tailoring needs it.");
       return;
     }
     setBusy(kind);
@@ -196,7 +356,25 @@ function JobDetail({ job, profile, onUpdate, onDelete, onBack }) {
     { key: "cover", label: "Cover Letter", btn: "Generate Cover Letter" },
     { key: "fit", label: "Fit Analysis + Resume Bullets", btn: "Analyze Fit" },
     { key: "prep", label: "Interview Prep", btn: "Prep Interview" },
+    { key: "tailor", label: "Tailored Resume", btn: "Tailor Resume" },
   ];
+
+  const handleDownloadPDF = async (jsonString, company) => {
+    try {
+      let data = typeof jsonString === 'string' ? JSON.parse(jsonString) : jsonString;
+      const blob = await pdf(<ResumePDF data={data} />).toBlob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `Resume_${company.replace(/\s+/g, "_")}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      alert("PDF Generation failed: " + e.message);
+    }
+  };
 
   return (
     <div>
@@ -231,6 +409,19 @@ function JobDetail({ job, profile, onUpdate, onDelete, onBack }) {
               {busy === o.key ? <span><span className="jo-spin">◐</span> Working…</span> : o.btn}
             </button>
           ))}
+          {job.link && (
+            <button className="jo-btn accent" disabled={busy === "apply"} style={{ background: "var(--steel)", borderColor: "var(--steel)" }} onClick={async () => {
+              setBusy("apply");
+              try {
+                await api.autoApply(job.id);
+              } catch(e) {
+                setError("Auto-Apply failed: " + e.message);
+              }
+              setBusy("");
+            }}>
+              {busy === "apply" ? <span><span className="jo-spin">◐</span> Starting…</span> : "Auto-Apply (Playwright)"}
+            </button>
+          )}
         </div>
         {error && <div className="jo-error">{error}</div>}
 
@@ -239,12 +430,42 @@ function JobDetail({ job, profile, onUpdate, onDelete, onBack }) {
             <div key={o.key}>
               <div className="jo-output-h">
                 <span className="jo-output-title" style={{ color: "var(--orange)" }}>{o.label}</span>
-                <button className="jo-btn sm ghost" onClick={() => copy(job.ai[o.key])}>Copy</button>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button className="jo-btn sm ghost" onClick={() => copy(outputText(job.ai[o.key]))}>Copy</button>
+                  {o.key === "tailor" && (
+                    <button className="jo-btn sm accent" onClick={() => handleDownloadPDF(job.ai[o.key], job.company)}>Download PDF</button>
+                  )}
+                </div>
               </div>
-              <div className="jo-output">{job.ai[o.key]}</div>
+              {o.key === "tailor" ? (
+                <div className="jo-output">
+                  ✓ Tailored resume generated for {job.company}. Use “Download PDF” to export it, or Copy for the raw JSON.
+                </div>
+              ) : (
+                <div className="jo-output">{outputText(job.ai[o.key])}</div>
+              )}
             </div>
           ) : null
         )}
+
+        <div style={{ marginTop: 24, borderTop: "1px solid var(--line)", paddingTop: 16 }}>
+          <div className="jo-output-title">Mock Interview</div>
+          <p className="jo-note">Chat with an AI hiring manager to practice for this role.</p>
+          <div style={{ maxHeight: 400, overflowY: "auto", border: "1px solid var(--line)", padding: 12, marginTop: 8, background: "var(--paper)", display: "flex", flexDirection: "column", gap: 8 }}>
+            {(job.ai?.chat || []).map((msg, i) => (
+              <div key={i} style={{ alignSelf: msg.role === "user" ? "flex-end" : "flex-start", background: msg.role === "user" ? "var(--card)" : "var(--card)", padding: "8px 12px", borderRadius: 4, maxWidth: "85%", border: msg.role === "user" ? "1px solid var(--orange)" : "1px solid var(--line)", borderLeft: msg.role === "assistant" ? "3px solid var(--orange)" : undefined }}>
+                <div style={{ fontSize: 10, color: "var(--ink-soft)", marginBottom: 2, textTransform: "uppercase", fontWeight: 500 }}>{msg.role === "user" ? "You" : "Interviewer"}</div>
+                <div style={{ whiteSpace: "pre-wrap", fontSize: 14 }}>{msg.content}</div>
+              </div>
+            ))}
+            {chatBusy && <div style={{ alignSelf: "flex-start", padding: "8px 12px", color: "var(--ink-soft)" }}><span className="jo-spin">◐</span> Typing...</div>}
+            {(job.ai?.chat || []).length === 0 && !chatBusy && <div style={{ color: "var(--ink-soft)", textAlign: "center", padding: 20 }}>No messages yet. Send a message to start!</div>}
+          </div>
+          <div className="jo-row" style={{ marginTop: 8, flexWrap: "nowrap" }}>
+            <input className="jo-input" style={{ flex: 1 }} value={chatMsg} onChange={e => setChatMsg(e.target.value)} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleChat(); } }} placeholder="Type your response..." />
+            <button className="jo-btn accent" disabled={!chatMsg.trim() || chatBusy} onClick={handleChat}>Send</button>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -283,19 +504,80 @@ function AddJob({ onAdd }) {
   );
 }
 
+/* ---------------- Analytics ---------------- */
+function Analytics({ jobs }) {
+  const appliedJobs = jobs.filter(j => j.status !== "Saved");
+  const totalApplied = appliedJobs.length;
+  
+  const responses = appliedJobs.filter(j => ["Screen", "Interview", "Offer", "Rejected"].includes(j.status));
+  const totalResponses = responses.length;
+  const responseRate = totalApplied ? Math.round((totalResponses / totalApplied) * 100) : 0;
+  
+  const interviews = appliedJobs.filter(j => ["Screen", "Interview", "Offer"].includes(j.status));
+  const totalInterviews = interviews.length;
+  const interviewRate = totalApplied ? Math.round((totalInterviews / totalApplied) * 100) : 0;
+
+  const offers = appliedJobs.filter(j => j.status === "Offer");
+  const totalOffers = offers.length;
+  const offerRate = totalApplied ? Math.round((totalOffers / totalApplied) * 100) : 0;
+
+  return (
+    <div>
+      <div className="jo-card">
+        <div className="jo-output-title">Funnel Metrics</div>
+        <p className="jo-note">Conversion rates across your application pipeline.</p>
+        
+        <div style={{ display: "flex", gap: 16, marginTop: 16, flexWrap: "wrap" }}>
+          <div style={{ flex: 1, minWidth: 200, padding: 16, background: "var(--paper)", border: "1px solid var(--line)" }}>
+            <div style={{ fontSize: 32, fontWeight: 700, fontFamily: "'Space Grotesk', sans-serif" }}>{totalApplied}</div>
+            <div style={{ fontSize: 12, color: "var(--ink-soft)", textTransform: "uppercase", letterSpacing: "0.1em" }}>Total Applications</div>
+          </div>
+          <div style={{ flex: 1, minWidth: 200, padding: 16, background: "var(--paper)", border: "1px solid var(--line)" }}>
+            <div style={{ fontSize: 32, fontWeight: 700, fontFamily: "'Space Grotesk', sans-serif", color: "var(--steel)" }}>{responseRate}%</div>
+            <div style={{ fontSize: 12, color: "var(--ink-soft)", textTransform: "uppercase", letterSpacing: "0.1em" }}>Response Rate</div>
+            <div className="jo-note">{totalResponses} heard back</div>
+          </div>
+          <div style={{ flex: 1, minWidth: 200, padding: 16, background: "var(--paper)", border: "1px solid var(--line)" }}>
+            <div style={{ fontSize: 32, fontWeight: 700, fontFamily: "'Space Grotesk', sans-serif", color: "var(--orange)" }}>{interviewRate}%</div>
+            <div style={{ fontSize: 12, color: "var(--ink-soft)", textTransform: "uppercase", letterSpacing: "0.1em" }}>Interview Rate</div>
+            <div className="jo-note">{totalInterviews} screens/interviews</div>
+          </div>
+          <div style={{ flex: 1, minWidth: 200, padding: 16, background: "var(--paper)", border: "1px solid var(--line)" }}>
+            <div style={{ fontSize: 32, fontWeight: 700, fontFamily: "'Space Grotesk', sans-serif", color: "var(--green)" }}>{offerRate}%</div>
+            <div style={{ fontSize: 12, color: "var(--ink-soft)", textTransform: "uppercase", letterSpacing: "0.1em" }}>Offer Rate</div>
+            <div className="jo-note">{totalOffers} offers</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ---------------- App ---------------- */
 export default function App() {
-  const [state, setState] = useState({ profile: "", jobs: [] });
+  const [state, setState] = useState({ profile: { text: "", json_data: {} }, jobs: [] });
   const [loaded, setLoaded] = useState(false);
   const [loadError, setLoadError] = useState("");
   const [tab, setTab] = useState("pipeline");
   const [openId, setOpenId] = useState(null);
   const [savedFlash, setSavedFlash] = useState(false);
+  const [inbox, setInbox] = useState([]);
+  const [companies, setCompanies] = useState([]);
+  const [settings, setSettings] = useState({});
+  const [scanBusy, setScanBusy] = useState(false);
+  const [scanSummary, setScanSummary] = useState("");
+  const [parseBusy, setParseBusy] = useState(false);
+  const [parseFlash, setParseFlash] = useState(false);
   const timers = useRef({});
 
   useEffect(() => {
-    Promise.all([api.getProfile(), api.getJobs()])
-      .then(([profile, jobs]) => setState({ profile, jobs }))
+    Promise.all([api.getProfile(), api.getJobs(), api.getInbox(), api.getCompanies(), api.getSettings()])
+      .then(([profile, jobs, postings, comps, setts]) => {
+        setState({ profile, jobs });
+        setInbox(postings);
+        setCompanies(comps);
+        setSettings(setts);
+      })
       .catch((e) => setLoadError(e.message))
       .finally(() => setLoaded(true));
   }, []);
@@ -332,19 +614,93 @@ export default function App() {
     api.deleteJob(id).catch(console.error);
   };
 
-  const setProfile = (profile) => {
-    setState((s) => ({ ...s, profile }));
-    debounce("profile", () => api.saveProfile(profile).catch(console.error));
+  const setProfileText = (text) => {
+    setState((s) => ({ ...s, profile: { ...s.profile, text } }));
+    debounce("profile", () => api.saveProfile(text).catch(console.error));
   };
 
   const saveProfileNow = async () => {
     clearTimeout(timers.current["profile"]);
     try {
-      await api.saveProfile(state.profile);
+      await api.saveProfile(state.profile.text);
       setSavedFlash(true);
       setTimeout(() => setSavedFlash(false), 1600);
     } catch (e) {
       alert("Save failed: " + e.message);
+    }
+  };
+
+  const handleParseProfile = async () => {
+    setParseBusy(true);
+    try {
+      const updated = await api.parseProfile();
+      setState((s) => ({ ...s, profile: updated }));
+      setParseFlash(true);
+      setTimeout(() => setParseFlash(false), 1600);
+    } catch (e) {
+      alert("Parse failed: " + e.message);
+    }
+    setParseBusy(false);
+  };
+
+  const handleScan = async () => {
+    setScanBusy(true);
+    setScanSummary("");
+    try {
+      const r = await api.scan();
+      const bits = [`${r.fetched} fetched`, `${r.new} new`, `${r.scored} scored`];
+      if (r.belowThreshold) bits.push(`${r.belowThreshold} below threshold`);
+      let msg = `Last scan: ${bits.join(", ")}.`;
+      for (const extra of [...(r.notes ?? []), ...(r.errors ?? [])]) msg += ` ${extra}.`;
+      setScanSummary(msg);
+      setInbox(await api.getInbox());
+    } catch (e) {
+      setScanSummary("Scan failed: " + e.message);
+    }
+    setScanBusy(false);
+  };
+
+  const acceptPosting = async (p) => {
+    setInbox((x) => x.filter((i) => i.id !== p.id));
+    try {
+      const job = await api.acceptPosting(p.id);
+      setState((s) => ({ ...s, jobs: [job, ...s.jobs] }));
+    } catch (e) {
+      alert("Accept failed: " + e.message);
+      setInbox(await api.getInbox());
+    }
+  };
+
+  const dismissPosting = (p) => {
+    setInbox((x) => x.filter((i) => i.id !== p.id));
+    api.dismissPosting(p.id).catch(console.error);
+  };
+
+  const addCompany = async (company) => {
+    try {
+      const created = await api.addCompany(company);
+      setCompanies((c) => [...c, { ...created, active: true }]);
+    } catch (e) {
+      alert("Failed to add company: " + e.message);
+    }
+  };
+
+  const toggleCompany = (c) => {
+    setCompanies((list) => list.map((x) => (x.id === c.id ? { ...x, active: !x.active } : x)));
+    api.setCompanyActive(c.id, !c.active).catch(console.error);
+  };
+
+  const removeCompany = (id) => {
+    setCompanies((list) => list.filter((x) => x.id !== id));
+    api.deleteCompany(id).catch(console.error);
+  };
+
+  const saveSettings = async (next) => {
+    try {
+      setSettings(await api.saveSettings(next));
+      setInbox(await api.getInbox()); // min_score may have changed
+    } catch (e) {
+      alert("Failed to save settings: " + e.message);
     }
   };
 
@@ -373,24 +729,43 @@ export default function App() {
         {loadError && <div className="jo-error">Couldn't reach the server: {loadError}. Is it running on port 3001?</div>}
 
         <nav className="jo-tabs">
-          {[["pipeline", "PIPELINE"], ["add", "+ ADD JOB"], ["profile", "PROFILE"]].map(([k, l]) => (
+          {[
+            ["pipeline", "PIPELINE"],
+            ["inbox", inbox.length ? `INBOX (${inbox.length})` : "INBOX"],
+            ["analytics", "ANALYTICS"],
+            ["add", "+ ADD JOB"],
+            ["profile", "PROFILE"],
+            ["sources", "SOURCES"],
+          ].map(([k, l]) => (
             <button key={k} className={"jo-tab " + (tab === k && !openJob ? "active" : "")} onClick={() => { setTab(k); setOpenId(null); }}>{l}</button>
           ))}
         </nav>
 
         {openJob ? (
           <JobDetail job={openJob} profile={state.profile} onUpdate={updateJob} onDelete={deleteJob} onBack={() => setOpenId(null)} />
+        ) : tab === "inbox" ? (
+          <Inbox postings={inbox} scanBusy={scanBusy} scanSummary={scanSummary}
+            onScan={handleScan} onAccept={acceptPosting} onDismiss={dismissPosting} />
+        ) : tab === "analytics" ? (
+          <Analytics jobs={state.jobs} />
+        ) : tab === "sources" ? (
+          <Sources companies={companies} settings={settings} onAddCompany={addCompany}
+            onToggleCompany={toggleCompany} onDeleteCompany={removeCompany} onSaveSettings={saveSettings} />
         ) : tab === "profile" ? (
           <div className="jo-card">
             <div className="jo-output-title">Your background — written once, used everywhere</div>
             <p className="jo-note">Paste your resume text, key projects, skills, and anything you want emphasized. Every cover letter, fit analysis, and interview prep is generated from this.</p>
             <label className="jo-label">Profile / Resume Text</label>
-            <textarea className="jo-textarea" style={{ minHeight: 320 }} value={state.profile}
-              onChange={(e) => setProfile(e.target.value)}
+            <textarea className="jo-textarea" style={{ minHeight: 320 }} value={state.profile.text}
+              onChange={(e) => setProfileText(e.target.value)}
               placeholder={"Example:\nComputer Engineering @ UMD, GPA 3.69\nSystems Engineering Intern @ Booz Allen Hamilton\nGround Station Lead, UMD Satellite Development Program — Python telemetry decoding, real-time visualization, packet parsing\nSkills: Python, MATLAB, C, Firebase, PCB design…"} />
             <div className="jo-row" style={{ alignItems: "center" }}>
               <button className="jo-btn" onClick={saveProfileNow}>Save Profile</button>
               {savedFlash && <span className="jo-saved-flash">✓ Saved</span>}
+              <button className="jo-btn accent" disabled={parseBusy} onClick={handleParseProfile}>
+                {parseBusy ? <span><span className="jo-spin">◐</span> Parsing…</span> : "Generate Structured Resume"}
+              </button>
+              {parseFlash && <span className="jo-saved-flash">✓ Structured data ready</span>}
             </div>
           </div>
         ) : tab === "add" ? (
