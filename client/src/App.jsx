@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { api } from "./api.js";
 import { pdf } from "@react-pdf/renderer";
-import ResumePDF from "./ResumePDF.jsx";
+import ResumePDF, { TEMPLATES, COLORS, FONTS } from "./ResumePDF.jsx";
 
 /* ============================================================
    JOB OPS — Application Command Center
@@ -140,6 +140,22 @@ const css = `
 .jo-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
 .jo-saved-flash { color: var(--green); font-family: 'IBM Plex Mono', monospace; font-size: 12px; }
 .jo-error { color: var(--red); font-size: 13px; margin-top: 10px; }
+
+/* Resume Studio */
+.jo-template-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-top: 10px; }
+.jo-template-card {
+  border: 1px solid var(--line); background: var(--paper); padding: 14px; cursor: pointer;
+  transition: all 0.15s ease; position: relative;
+}
+.jo-template-card:hover { border-color: var(--steel); }
+.jo-template-card.active { border-color: var(--orange); background: var(--card); box-shadow: 0 0 0 2px var(--orange-soft); }
+.jo-template-title { font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 14px; margin-bottom: 4px; }
+.jo-swatch-group { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.jo-swatch {
+  width: 28px; height: 28px; border-radius: 50%; border: 2px solid transparent; cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center; font-size: 12px; color: #FFF;
+}
+.jo-swatch.active { border-color: var(--ink); transform: scale(1.15); }
 `;
 
 /* ---------------- Pipeline Rail ---------------- */
@@ -216,6 +232,13 @@ function Inbox({ postings, scanBusy, scanSummary, onScan, onAccept, onDismiss })
             </div>
             <div className="jo-row">
               <button className="jo-btn sm accent" onClick={() => onAccept(p)}>Accept → Pipeline</button>
+              {p.url && (
+                <button className="jo-btn sm accent" style={{ background: "var(--steel)", borderColor: "var(--steel)" }}
+                  onClick={async () => {
+                    const job = await onAccept(p);
+                    if (job?.id) api.autoApply(job.id).catch(console.error);
+                  }}>⚡ Auto-Apply</button>
+              )}
               <button className="jo-btn sm ghost" onClick={() => onDismiss(p)}>Dismiss</button>
               {p.url && (
                 <a className="jo-btn sm ghost" style={{ textDecoration: "none", display: "inline-flex", alignItems: "center" }}
@@ -225,6 +248,183 @@ function Inbox({ postings, scanBusy, scanSummary, onScan, onAccept, onDismiss })
           </div>
         ))
       )}
+    </div>
+  );
+}
+
+function AiJobFinder({ onAccept, onDismiss, onBulkAddCompanies }) {
+  const [query, setQuery] = useState("");
+  const [searching, setSearching] = useState(false);
+  const [results, setResults] = useState(null);
+  const [error, setError] = useState(null);
+
+  const [suggesting, setSuggesting] = useState(false);
+  const [suggestions, setSuggestions] = useState([]);
+  const [addedFlash, setAddedFlash] = useState(false);
+
+  const PRESETS = [
+    { label: "⚡ Auto-Hunt Matching Jobs", query: "" },
+    { label: "🤖 AI / ML Engineering", query: "Find AI/ML engineering, LLM, or Machine Learning intern and junior roles" },
+    { label: "🛰️ Defense & Space Tech", query: "Find defense tech, aerospace, embedded systems, ground station, or satellite software roles" },
+    { label: "💻 Full Stack & Systems", query: "Find full stack, backend, or systems engineering positions in NYC or Remote" },
+  ];
+
+  const handleSearch = async (customQuery = query) => {
+    setSearching(true);
+    setError(null);
+    try {
+      const res = await api.aiSearch(customQuery);
+      setResults(res);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSearching(false);
+    }
+  };
+
+  const handleSuggestCompanies = async () => {
+    setSuggesting(true);
+    try {
+      const comps = await api.aiSuggestCompanies();
+      setSuggestions(comps);
+    } catch (e) {
+      alert("Failed to get suggestions: " + e.message);
+    } finally {
+      setSuggesting(false);
+    }
+  };
+
+  const handleAddAllSuggestions = async () => {
+    if (!suggestions.length) return;
+    try {
+      await onBulkAddCompanies(suggestions);
+      setAddedFlash(true);
+      setTimeout(() => setAddedFlash(false), 3000);
+    } catch (e) {
+      alert("Failed to add companies: " + e.message);
+    }
+  };
+
+  return (
+    <div>
+      <div className="jo-card">
+        <div className="jo-output-title">🤖 AI Job Finder & Automated Agent</div>
+        <p className="jo-note">
+          Describe the jobs you want in plain English or click 1-Click Auto-Hunt. Claude analyzes your master profile, formulates a targeted ATS search strategy across top company boards, pulls active postings, and ranks them by fit score.
+        </p>
+
+        <div style={{ margin: "16px 0 12px", display: "flex", flexWrap: "wrap", gap: 8 }}>
+          {PRESETS.map((p, i) => (
+            <button key={i} className="jo-btn sm ghost" disabled={searching} onClick={() => { setQuery(p.query); handleSearch(p.query); }}>
+              {p.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="jo-row" style={{ marginTop: 12 }}>
+          <input className="jo-input" style={{ flex: 1 }} value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && !searching && handleSearch(query)}
+            placeholder="e.g. Find remote full stack or AI startup roles looking for Python & C++" />
+          <button className="jo-btn accent" disabled={searching} onClick={() => handleSearch(query)}>
+            {searching ? <span><span className="jo-spin">◐</span> AI Agent Searching…</span> : "Hunt Jobs with AI"}
+          </button>
+        </div>
+
+        {error && <div className="jo-error" style={{ marginTop: 12 }}>Search failed: {error}</div>}
+      </div>
+
+      {/* AI Search Results */}
+      {results && (
+        <div className="jo-card" style={{ borderColor: "var(--orange)", background: "var(--orange-soft)" }}>
+          <div className="jo-card-h">
+            <div>
+              <div className="jo-company" style={{ color: "var(--orange)" }}>AI Search Strategy Summary</div>
+              <div className="jo-role">{results.searchFocus}</div>
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <span className="jo-badge">Companies Scanned: {results.companiesSearched}</span>
+              <span className="jo-badge">Found: {results.fetchedCount}</span>
+              <span className="jo-badge" style={{ borderColor: "var(--green)", color: "var(--green)" }}>High Fit: {results.topMatches.length}</span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {results && results.topMatches.length === 0 && (
+        <div className="jo-empty">
+          <div className="jo-empty-h">No new matches found</div>
+          <p>The AI agent scanned target ATS boards. All matching positions were either filtered by your criteria or already added to your pipeline.</p>
+        </div>
+      )}
+
+      {results && results.topMatches.map((p) => (
+        <div className="jo-card" key={p.id}>
+          <div className="jo-card-h">
+            <div>
+              <div className="jo-company">{p.company}</div>
+              <div className="jo-role">{p.title}{p.location ? ` · ${p.location}` : ""}</div>
+              {p.reason && <p className="jo-note">{p.reason}</p>}
+            </div>
+            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              {p.score != null
+                ? <span className="jo-badge" style={{ color: scoreColor(p.score), borderColor: scoreColor(p.score) }}>Fit {p.score}/10</span>
+                : <span className="jo-badge">Unscored</span>}
+              <span className="jo-badge">{p.source}</span>
+            </div>
+          </div>
+          <div className="jo-row">
+            <button className="jo-btn sm accent" onClick={() => onAccept(p)}>Accept → Pipeline</button>
+            {p.url && (
+              <button className="jo-btn sm accent" style={{ background: "var(--steel)", borderColor: "var(--steel)" }}
+                onClick={async () => {
+                  const job = await onAccept(p);
+                  if (job?.id) api.autoApply(job.id).catch(console.error);
+                }}>⚡ Auto-Apply</button>
+            )}
+            <button className="jo-btn sm ghost" onClick={() => onDismiss(p)}>Dismiss</button>
+            {p.url && (
+              <a className="jo-btn sm ghost" style={{ textDecoration: "none", display: "inline-flex", alignItems: "center" }}
+                href={p.url} target="_blank" rel="noreferrer">View Posting ↗</a>
+            )}
+          </div>
+        </div>
+      ))}
+
+      {/* AI Company Recommendations Engine */}
+      <div className="jo-card" style={{ marginTop: 28 }}>
+        <div className="jo-card-h">
+          <div>
+            <div className="jo-output-title">🏢 AI Target Company Generator</div>
+            <p className="jo-note">Let Claude analyze your profile and find 12 specific companies in your niche with active ATS boards to watch.</p>
+          </div>
+          <button className="jo-btn" disabled={suggesting} onClick={handleSuggestCompanies}>
+            {suggesting ? <span><span className="jo-spin">◐</span> Analyzing…</span> : "Generate Recommendations"}
+          </button>
+        </div>
+
+        {suggestions.length > 0 && (
+          <div style={{ marginTop: 16 }}>
+            <div className="jo-row" style={{ marginBottom: 12, justifyContent: "space-between", alignItems: "center" }}>
+              <div className="jo-eyebrow">{suggestions.length} Recommended Targets</div>
+              <button className="jo-btn sm accent" onClick={handleAddAllSuggestions}>
+                {addedFlash ? "✓ Added to Watchlist!" : `+ Add All ${suggestions.length} to Watchlist`}
+              </button>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 10 }}>
+              {suggestions.map((c, i) => (
+                <div key={i} style={{ border: "1px solid var(--line)", padding: 12, background: "var(--card)" }}>
+                  <div style={{ fontWeight: 700, fontSize: 15 }}>{c.name}</div>
+                  <div style={{ fontSize: 11, fontFamily: "monospace", color: "var(--steel)", textTransform: "uppercase" }}>
+                    {c.ats} · {c.industry}
+                  </div>
+                  <div className="jo-note" style={{ marginTop: 4, fontSize: 12 }}>{c.reason}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -324,7 +524,7 @@ function Sources({ companies, settings, models = [], onAddCompany, onToggleCompa
 }
 
 /* ---------------- Job Detail ---------------- */
-function JobDetail({ job, profile, rates, genModel, onUpdate, onDelete, onBack }) {
+function JobDetail({ job, profile, rates, genModel, settings, onUpdate, onDelete, onBack }) {
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [chatBusy, setChatBusy] = useState(false);
@@ -382,12 +582,20 @@ function JobDetail({ job, profile, rates, genModel, onUpdate, onDelete, onBack }
     { key: "fit", label: "Fit Analysis + Resume Bullets", btn: "Analyze Fit" },
     { key: "prep", label: "Interview Prep", btn: "Prep Interview" },
     { key: "tailor", label: "Tailored Resume", btn: "Tailor Resume" },
+    { key: "outreach", label: "Recruiter Cold Email / InMail", btn: "Recruiter Cold Email" },
   ];
 
   const handleDownloadPDF = async (jsonString, company) => {
     try {
       let data = typeof jsonString === 'string' ? JSON.parse(jsonString) : jsonString;
-      const blob = await pdf(<ResumePDF data={data} />).toBlob();
+      const blob = await pdf(
+        <ResumePDF
+          data={data}
+          template={settings?.resume_template || "classic"}
+          primaryColor={settings?.resume_color || "navy"}
+          fontFamily={settings?.resume_font || "Helvetica"}
+        />
+      ).toBlob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -523,9 +731,8 @@ function AddJob({ onAdd }) {
   const submit = () => {
     if (!company.trim() || !role.trim()) return;
     onAdd({
-      id: Date.now().toString(36),
       company: company.trim(), role: role.trim(), link: link.trim(), jd,
-      status: "Saved", created: new Date().toISOString(), notes: "", ai: {},
+      notes: "",
     });
     setCompany(""); setRole(""); setLink(""); setJd("");
   };
@@ -643,6 +850,157 @@ function Analytics() {
   );
 }
 
+/* ---------------- Resume Studio ---------------- */
+function ResumeStudio({ settings, profile, onSaveSettings }) {
+  const [template, setTemplate] = useState(settings.resume_template || "classic");
+  const [color, setColor] = useState(settings.resume_color || "navy");
+  const [font, setFont] = useState(settings.resume_font || "Helvetica");
+  const [flash, setFlash] = useState(false);
+  const [previewBusy, setPreviewBusy] = useState(false);
+
+  useEffect(() => {
+    setTemplate(settings.resume_template || "classic");
+    setColor(settings.resume_color || "navy");
+    setFont(settings.resume_font || "Helvetica");
+  }, [settings]);
+
+  const save = async () => {
+    await onSaveSettings({
+      ...settings,
+      resume_template: template,
+      resume_color: color,
+      resume_font: font,
+    });
+    setFlash(true);
+    setTimeout(() => setFlash(false), 1600);
+  };
+
+  const downloadMasterPDF = async () => {
+    setPreviewBusy(true);
+    try {
+      const data = (profile.json_data && Object.keys(profile.json_data).length)
+        ? profile.json_data
+        : {
+            basics: {
+              name: "Alex Vance",
+              email: "alex.vance@example.com",
+              phone: "(555) 019-2831",
+              location: "College Park, MD",
+              url: "github.com/alexvance",
+            },
+            education: [
+              {
+                institution: "University of Maryland",
+                degree: "B.S. Computer Engineering",
+                date: "2022 – 2026",
+                gpa: "3.7",
+                bullets: ["Dean's List 2023–2025", "Telemetry Lead @ Satellite Dev Program"],
+              },
+            ],
+            experience: [
+              {
+                company: "Booz Allen Hamilton",
+                position: "Systems Engineering Intern",
+                date: "Jun 2025 – Aug 2025",
+                location: "McLean, VA",
+                bullets: [
+                  "Designed automated telemetry ingestion pipeline processing 50k events/sec.",
+                  "Built real-time dashboard reducing network latency diagnostics from hours to minutes.",
+                ],
+              },
+            ],
+            projects: [
+              {
+                name: "Autonomous Satellite Ground Station",
+                date: "2024",
+                description: "Real-time telemetry and orbit tracking platform.",
+                bullets: ["Built Rust packet parser for Doppler shift compensation.", "Integrated WebSockets telemetry dashboard."],
+              },
+            ],
+            skills: [
+              { category: "Languages", items: ["Python", "C++", "TypeScript", "SQL"] },
+              { category: "Frameworks & Tools", items: ["React", "Node.js", "Docker", "Git", "Playwright"] },
+            ],
+          };
+
+      const blob = await pdf(
+        <ResumePDF data={data} template={template} primaryColor={color} fontFamily={font} />
+      ).toBlob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `Resume_Master_${template}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      alert("PDF Preview failed: " + e.message);
+    }
+    setPreviewBusy(false);
+  };
+
+  return (
+    <div className="jo-card" style={{ marginTop: 16 }}>
+      <div className="jo-output-title">PDF Resume Studio & Template Customizer</div>
+      <p className="jo-note">
+        Customize the visual design of your exported PDF resumes. All tailored resume exports and auto-apply submissions will use these settings.
+      </p>
+
+      <label className="jo-label">1. Choose Resume Layout Template</label>
+      <div className="jo-template-grid">
+        {TEMPLATES.map((t) => (
+          <div
+            key={t.id}
+            className={"jo-template-card " + (template === t.id ? "active" : "")}
+            onClick={() => setTemplate(t.id)}
+          >
+            <div className="jo-template-title">{t.name}</div>
+            <p className="jo-note" style={{ margin: 0, fontSize: 11 }}>{t.description}</p>
+          </div>
+        ))}
+      </div>
+
+      <div className="jo-row" style={{ marginTop: 16, gap: 24 }}>
+        <div style={{ flex: 1, minWidth: 220 }}>
+          <label className="jo-label">2. Accent Color Palette</label>
+          <div className="jo-swatch-group">
+            {COLORS.map((c) => (
+              <button
+                key={c.id}
+                type="button"
+                className={"jo-swatch " + (color === c.id || color === c.hex ? "active" : "")}
+                style={{ backgroundColor: c.hex }}
+                title={c.label}
+                onClick={() => setColor(c.id)}
+              >
+                {(color === c.id || color === c.hex) ? "✓" : ""}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ flex: 1, minWidth: 220 }}>
+          <label className="jo-label">3. Typography / Font Family</label>
+          <select className="jo-input" value={font} onChange={(e) => setFont(e.target.value)}>
+            {FONTS.map((f) => (
+              <option key={f.id} value={f.id}>{f.label}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      <div className="jo-row" style={{ alignItems: "center", marginTop: 20 }}>
+        <button className="jo-btn accent" onClick={save}>Save Style Defaults</button>
+        {flash && <span className="jo-saved-flash">✓ Style defaults saved</span>}
+        <button className="jo-btn ghost" disabled={previewBusy} onClick={downloadMasterPDF}>
+          {previewBusy ? <span><span className="jo-spin">◐</span> Exporting PDF…</span> : "Preview / Export Sample PDF ↗"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /* ---------------- App ---------------- */
 export default function App() {
   const [state, setState] = useState({ profile: { text: "", json_data: {} }, jobs: [] });
@@ -692,13 +1050,12 @@ export default function App() {
   };
 
   const addJob = async (job) => {
-    setState((s) => ({ ...s, jobs: [job, ...s.jobs] }));
     setTab("pipeline");
     try {
-      await api.addJob(job);
+      const saved = await api.addJob(job);
+      setState((s) => ({ ...s, jobs: [saved, ...s.jobs] }));
     } catch (e) {
       alert("Failed to save job: " + e.message);
-      setState((s) => ({ ...s, jobs: s.jobs.filter((j) => j.id !== job.id) }));
     }
   };
 
@@ -779,6 +1136,15 @@ export default function App() {
     }
   };
 
+  const bulkAddCompanies = async (list) => {
+    try {
+      await api.bulkAddCompanies(list);
+      setCompanies(await api.getCompanies());
+    } catch (e) {
+      alert("Failed to add companies: " + e.message);
+    }
+  };
+
   const toggleCompany = (c) => {
     setCompanies((list) => list.map((x) => (x.id === c.id ? { ...x, active: !x.active } : x)));
     api.setCompanyActive(c.id, !c.active).catch(console.error);
@@ -826,6 +1192,7 @@ export default function App() {
           {[
             ["pipeline", "PIPELINE"],
             ["inbox", inbox.length ? `INBOX (${inbox.length})` : "INBOX"],
+            ["ai_finder", "🤖 AI JOB FINDER"],
             ["analytics", "ANALYTICS"],
             ["add", "+ ADD JOB"],
             ["profile", "PROFILE"],
@@ -836,32 +1203,38 @@ export default function App() {
         </nav>
 
         {openJob ? (
-          <JobDetail job={openJob} profile={state.profile} rates={config.rates} genModel={settings.gen_model}
+          <JobDetail job={openJob} profile={state.profile} rates={config.rates} genModel={settings.gen_model} settings={settings}
             onUpdate={updateJob} onDelete={deleteJob} onBack={() => setOpenId(null)} />
         ) : tab === "inbox" ? (
           <Inbox postings={inbox} scanBusy={scanBusy} scanSummary={scanSummary}
             onScan={handleScan} onAccept={acceptPosting} onDismiss={dismissPosting} />
+        ) : tab === "ai_finder" ? (
+          <AiJobFinder onAccept={acceptPosting} onDismiss={dismissPosting} onBulkAddCompanies={bulkAddCompanies} />
         ) : tab === "analytics" ? (
           <Analytics />
         ) : tab === "sources" ? (
           <Sources companies={companies} settings={settings} models={config.models} onAddCompany={addCompany}
             onToggleCompany={toggleCompany} onDeleteCompany={removeCompany} onSaveSettings={saveSettings} />
         ) : tab === "profile" ? (
-          <div className="jo-card">
-            <div className="jo-output-title">Your background — written once, used everywhere</div>
-            <p className="jo-note">Paste your resume text, key projects, skills, and anything you want emphasized. Every cover letter, fit analysis, and interview prep is generated from this.</p>
-            <label className="jo-label">Profile / Resume Text</label>
-            <textarea className="jo-textarea" style={{ minHeight: 320 }} value={state.profile.text}
-              onChange={(e) => setProfileText(e.target.value)}
-              placeholder={"Example:\nComputer Engineering @ UMD, GPA 3.69\nSystems Engineering Intern @ Booz Allen Hamilton\nGround Station Lead, UMD Satellite Development Program — Python telemetry decoding, real-time visualization, packet parsing\nSkills: Python, MATLAB, C, Firebase, PCB design…"} />
-            <div className="jo-row" style={{ alignItems: "center" }}>
-              <button className="jo-btn" onClick={saveProfileNow}>Save Profile</button>
-              {savedFlash && <span className="jo-saved-flash">✓ Saved</span>}
-              <button className="jo-btn accent" disabled={parseBusy} onClick={handleParseProfile}>
-                {parseBusy ? <span><span className="jo-spin">◐</span> Parsing…</span> : "Generate Structured Resume"}
-              </button>
-              {parseFlash && <span className="jo-saved-flash">✓ Structured data ready</span>}
+          <div>
+            <div className="jo-card">
+              <div className="jo-output-title">Your background — written once, used everywhere</div>
+              <p className="jo-note">Paste your resume text, key projects, skills, and anything you want emphasized. Every cover letter, fit analysis, and interview prep is generated from this.</p>
+              <label className="jo-label">Profile / Resume Text</label>
+              <textarea className="jo-textarea" style={{ minHeight: 320 }} value={state.profile.text}
+                onChange={(e) => setProfileText(e.target.value)}
+                placeholder={"Example:\nComputer Engineering @ UMD, GPA 3.69\nSystems Engineering Intern @ Booz Allen Hamilton\nGround Station Lead, UMD Satellite Development Program — Python telemetry decoding, real-time visualization, packet parsing\nSkills: Python, MATLAB, C, Firebase, PCB design…"} />
+              <div className="jo-row" style={{ alignItems: "center" }}>
+                <button className="jo-btn" onClick={saveProfileNow}>Save Profile</button>
+                {savedFlash && <span className="jo-saved-flash">✓ Saved</span>}
+                <button className="jo-btn accent" disabled={parseBusy} onClick={handleParseProfile}>
+                  {parseBusy ? <span><span className="jo-spin">◐</span> Parsing…</span> : "Generate Structured Resume"}
+                </button>
+                {parseFlash && <span className="jo-saved-flash">✓ Structured data ready</span>}
+              </div>
             </div>
+
+            <ResumeStudio settings={settings} profile={state.profile} onSaveSettings={saveSettings} />
           </div>
         ) : tab === "add" ? (
           <AddJob onAdd={addJob} />

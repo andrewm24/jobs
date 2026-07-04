@@ -22,9 +22,15 @@ async function buildResumePdf(job, profile) {
   const tailored = job.ai?.tailor;
   const data = tailored?.basics ? tailored : profile.json_data?.basics ? profile.json_data : null;
   if (!data) return null;
+  const settings = db.getSettings();
+  const options = {
+    template: settings.resume_template,
+    primaryColor: settings.resume_color,
+    fontFamily: settings.resume_font,
+  };
   const out = path.join(os.tmpdir(), `resume-${randomUUID()}.pdf`);
   try {
-    await renderResumePdf(data, out);
+    await renderResumePdf(data, out, options);
     return out;
   } catch (e) {
     console.error("Resume PDF render failed:", e.message);

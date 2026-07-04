@@ -35,6 +35,7 @@ db.exec(`
     slug TEXT NOT NULL,
     active INTEGER NOT NULL DEFAULT 1
   );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_companies_slug ON companies(slug);
   CREATE TABLE IF NOT EXISTS postings (
     id TEXT PRIMARY KEY,
     company TEXT NOT NULL,
@@ -90,6 +91,30 @@ for (const stmt of [
 }
 
 db.exec("INSERT OR IGNORE INTO profile (id, text) VALUES (1, '')");
+
+// Pre-seed top engineering internship company targets
+const SEED_COMPANIES = [
+  { name: "Anthropic", ats: "ashby", slug: "anthropic" },
+  { name: "Anduril Industries", ats: "greenhouse", slug: "andurilindustries" },
+  { name: "Scale AI", ats: "greenhouse", slug: "scaleai" },
+  { name: "Palantir", ats: "lever", slug: "palantir" },
+  { name: "Stripe", ats: "greenhouse", slug: "stripe" },
+  { name: "OpenAI", ats: "greenhouse", slug: "openai" },
+  { name: "Databricks", ats: "greenhouse", slug: "databricks" },
+  { name: "Relativity Space", ats: "greenhouse", slug: "relativityspace" },
+  { name: "Astranis", ats: "greenhouse", slug: "astranis" },
+  { name: "Figma", ats: "greenhouse", slug: "figma" },
+  { name: "Linear", ats: "ashby", slug: "linear" },
+  { name: "Shield AI", ats: "greenhouse", slug: "shieldai" },
+  { name: "Cloudflare", ats: "greenhouse", slug: "cloudflare" },
+  { name: "Ramp", ats: "greenhouse", slug: "ramp" },
+  { name: "Robinhood", ats: "greenhouse", slug: "robinhood" },
+];
+
+const seedStmt = db.prepare("INSERT OR IGNORE INTO companies (name, ats, slug) VALUES (?, ?, ?)");
+for (const c of SEED_COMPANIES) {
+  seedStmt.run(c.name, c.ats, c.slug);
+}
 
 /* ---------------- events + usage (analytics, cost) ---------------- */
 
@@ -179,6 +204,8 @@ export function updateJob(id, patch) {
   if (!existing) return null;
   for (const key of PATCHABLE) {
     if (!(key in patch)) continue;
+    // M-2: Defense-in-depth — verify key is from the allowlist before SQL interpolation.
+    if (!PATCHABLE.includes(key)) throw new Error(`updateJob: invalid column "${key}"`);
     const value = key === "ai" ? JSON.stringify(patch.ai ?? {}) : patch[key];
     db.prepare(`UPDATE jobs SET ${key} = ? WHERE id = ?`).run(value, id);
   }
@@ -209,6 +236,24 @@ export function addCompany({ name, ats, slug }) {
   return db.prepare("SELECT * FROM companies WHERE id = ?").get(lastInsertRowid);
 }
 
+export function addCompaniesBulk(list) {
+  const existing = new Set(listCompanies().map((c) => c.slug.toLowerCase()));
+  const added = [];
+  for (const c of list ?? []) {
+    if (!c.name?.trim() || !c.slug?.trim() || !["greenhouse", "lever", "ashby"].includes(c.ats)) continue;
+    const slugNorm = c.slug.trim().toLowerCase();
+    if (existing.has(slugNorm)) continue;
+    try {
+      const row = addCompany({ name: c.name.trim(), ats: c.ats, slug: slugNorm });
+      added.push(row);
+      existing.add(slugNorm);
+    } catch (e) {
+      // Ignore duplicates or constraint errors
+    }
+  }
+  return added;
+}
+
 export function setCompanyActive(id, active) {
   db.prepare("UPDATE companies SET active = ? WHERE id = ?").run(active ? 1 : 0, id);
 }
@@ -229,6 +274,9 @@ const SETTINGS_DEFAULTS = {
   gen_model: "claude-opus-4-8",
   scoring_model: "claude-haiku-4-5",
   score_limit: "40",
+  resume_template: "classic",
+  resume_color: "navy",
+  resume_font: "Helvetica",
 };
 
 export function getSettings() {

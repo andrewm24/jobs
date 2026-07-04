@@ -51,4 +51,10 @@ export const api = {
   acceptPosting: (id) =>
     request(`/api/inbox/${id}/accept`, { method: "POST" }).then((d) => d.job),
   dismissPosting: (id) => request(`/api/inbox/${id}/dismiss`, { method: "POST" }),
+  aiSearch: (query) =>
+    request("/api/ai-search", { method: "POST", body: JSON.stringify({ query }) }),
+  aiSuggestCompanies: () =>
+    request("/api/ai-suggest-companies", { method: "POST" }).then((d) => d.companies),
+  bulkAddCompanies: (companies) =>
+    request("/api/companies/bulk", { method: "POST", body: JSON.stringify({ companies }) }),
 };

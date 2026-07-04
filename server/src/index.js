@@ -3,18 +3,58 @@ import path from "node:path";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
+import helmet from "helmet";
+import cors from "cors";
+import rateLimit from "express-rate-limit";
 import Anthropic from "@anthropic-ai/sdk";
 import * as db from "./db.js";
-import { generate, KINDS, parseMasterResume, chat, estimate } from "./claude.js";
+import { generate, KINDS, parseMasterResume, chat, estimate, recommendCompanies } from "./claude.js";
 import { runScan } from "./discovery/scan.js";
+import { runAiJobSearch } from "./discovery/aiSearch.js";
 import { runApplyAssist } from "./applyAssist.js";
 import { computeAnalytics } from "./analytics.js";
 import { MODEL_OPTIONS, RATES } from "./costs.js";
 
+const isProd = process.env.NODE_ENV === "production";
 const app = express();
+
+// --- Security middleware (H-2, M-1, C-1, H-3) ---
+
+// H-2: Security headers (CSP, X-Frame-Options, nosniff, etc.)
+app.use(helmet({ contentSecurityPolicy: false })); // CSP off to avoid blocking inline Vite styles in dev
+
+// M-1: CORS — restrict to known origins instead of allowing all
+const allowedOrigins = (process.env.CORS_ORIGINS || "http://localhost:5173,http://localhost:3001")
+  .split(",").map(s => s.trim());
+app.use(cors({
+  origin: (origin, cb) => {
+    // Allow requests with no origin (same-origin, curl, mobile apps)
+    if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
+    cb(new Error("Not allowed by CORS"));
+  },
+}));
+
 app.use(express.json({ limit: "1mb" }));
 
+// C-1: Optional bearer-token authentication for all /api routes
+const AUTH_TOKEN = process.env.JOBOPS_AUTH_TOKEN;
+if (AUTH_TOKEN) {
+  app.use("/api", (req, res, next) => {
+    const token = req.headers.authorization?.replace(/^Bearer\s+/i, "");
+    if (token !== AUTH_TOKEN) {
+      return res.status(401).json({ error: "Unauthorized — set Authorization: Bearer <token>" });
+    }
+    next();
+  });
+}
+
+// H-3: Rate limiting — general + tighter limit on expensive Claude-proxied endpoints
+app.use("/api", rateLimit({ windowMs: 60_000, max: 120, standardHeaders: true, legacyHeaders: false }));
+const claudeRateLimit = rateLimit({ windowMs: 60_000, max: 10, standardHeaders: true, legacyHeaders: false,
+  message: { error: "Too many AI requests — try again in a minute" } });
+
 // Consistent, human-readable errors for any Claude API failure.
+// M-4: In production, avoid leaking internal details in error messages.
 function claudeError(err, res) {
   if (err instanceof Anthropic.AuthenticationError) {
     return res.status(502).json({ error: "Claude API auth failed — set ANTHROPIC_API_KEY in server/.env" });
@@ -23,7 +63,8 @@ function claudeError(err, res) {
     return res.status(502).json({ error: "Claude API rate limited — try again shortly" });
   }
   if (err instanceof Anthropic.APIError) {
-    return res.status(502).json({ error: `Claude API error (${err.status}): ${err.message}` });
+    const detail = isProd ? "External API error" : `Claude API error (${err.status}): ${err.message}`;
+    return res.status(502).json({ error: detail });
   }
   if (/Could not resolve authentication/i.test(err?.message ?? "")) {
     return res.status(502).json({ error: "No Anthropic credentials — set ANTHROPIC_API_KEY in server/.env (copy server/.env.example)" });
@@ -41,11 +82,15 @@ app.put("/api/profile", (req, res) => {
   if (typeof profile !== "string") {
     return res.status(400).json({ error: "profile must be a string" });
   }
+  // L-2: Limit profile text length to prevent huge Claude prompts
+  if (profile.length > 50_000) {
+    return res.status(400).json({ error: "profile text too long (max 50,000 characters)" });
+  }
   db.setProfile(profile, json_data);
   res.json({ profile: db.getProfile() });
 });
 
-app.post("/api/profile/parse", async (req, res) => {
+app.post("/api/profile/parse", claudeRateLimit, async (req, res) => {
   const current = db.getProfile();
   if (!current.text.trim()) {
     return res.status(400).json({ error: "No profile text to parse." });
@@ -63,12 +108,18 @@ app.get("/api/jobs", (req, res) => {
   res.json({ jobs: db.listJobs() });
 });
 
+// M-5: Server-generate job ID; only accept expected fields from the client.
 app.post("/api/jobs", (req, res) => {
-  const { id, company, role } = req.body ?? {};
-  if (!id || !company?.trim() || !role?.trim()) {
-    return res.status(400).json({ error: "id, company, and role are required" });
+  const { company, role, link, jd, notes } = req.body ?? {};
+  if (!company?.trim() || !role?.trim()) {
+    return res.status(400).json({ error: "company and role are required" });
   }
-  res.status(201).json({ job: db.insertJob(req.body) });
+  const job = {
+    id: randomUUID(), company, role, link: link ?? "", jd: jd ?? "",
+    notes: notes ?? "", status: "Saved", created: new Date().toISOString(),
+    ai: {}, source: "manual",
+  };
+  res.status(201).json({ job: db.insertJob(job) });
 });
 
 app.patch("/api/jobs/:id", (req, res) => {
@@ -93,7 +144,7 @@ app.post("/api/jobs/:id/apply", async (req, res) => {
   }
 });
 
-app.post("/api/jobs/:id/chat", async (req, res) => {
+app.post("/api/jobs/:id/chat", claudeRateLimit, async (req, res) => {
   try {
     const { message } = req.body;
     if (!message) return res.status(400).json({ error: "message is required" });
@@ -122,7 +173,7 @@ app.post("/api/jobs/:id/chat", async (req, res) => {
   }
 });
 
-app.post("/api/generate", async (req, res) => {
+app.post("/api/generate", claudeRateLimit, async (req, res) => {
   const { jobId, kind } = req.body ?? {};
   if (!KINDS.includes(kind)) {
     return res.status(400).json({ error: `kind must be one of: ${KINDS.join(", ")}` });
@@ -142,7 +193,7 @@ app.post("/api/generate", async (req, res) => {
   }
 });
 
-app.post("/api/estimate", async (req, res) => {
+app.post("/api/estimate", claudeRateLimit, async (req, res) => {
   const { jobId, kind } = req.body ?? {};
   if (!KINDS.includes(kind)) {
     return res.status(400).json({ error: `kind must be one of: ${KINDS.join(", ")}` });
@@ -193,6 +244,44 @@ app.delete("/api/companies/:id", (req, res) => {
   res.status(204).end();
 });
 
+app.post("/api/companies/bulk", (req, res) => {
+  const { companies } = req.body ?? {};
+  if (!Array.isArray(companies)) {
+    return res.status(400).json({ error: "companies must be an array" });
+  }
+  const added = db.addCompaniesBulk(companies);
+  res.status(201).json({ added, total: db.listCompanies().length });
+});
+
+/* ---------------- AI Job Finder routes ---------------- */
+
+let aiSearching = false;
+
+app.post("/api/ai-search", claudeRateLimit, async (req, res) => {
+  if (aiSearching) return res.status(409).json({ error: "An AI search is already in progress" });
+  aiSearching = true;
+  try {
+    const { query } = req.body ?? {};
+    const result = await runAiJobSearch(query || "");
+    res.json(result);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: isProd ? "AI search failed" : err.message });
+  } finally {
+    aiSearching = false;
+  }
+});
+
+app.post("/api/ai-suggest-companies", claudeRateLimit, async (req, res) => {
+  try {
+    const profile = db.getProfile();
+    const suggestions = await recommendCompanies(profile.text);
+    res.json({ companies: suggestions });
+  } catch (err) {
+    return claudeError(err, res);
+  }
+});
+
 app.get("/api/settings", (req, res) => {
   res.json({ settings: db.getSettings() });
 });
@@ -214,19 +303,26 @@ app.put("/api/settings", (req, res) => {
       return res.status(400).json({ error: `${key} must be one of: ${modelIds.join(", ")}` });
     }
   }
+  // M-3: Validate github_repo to prevent URL manipulation / SSRF
+  if ("github_repo" in patch && patch.github_repo) {
+    if (!/^[A-Za-z0-9._-]+$/.test(patch.github_repo.trim())) {
+      return res.status(400).json({ error: "github_repo must be a simple repo name (letters, numbers, . _ - only)" });
+    }
+  }
   res.json({ settings: db.setSettings(patch) });
 });
 
 let scanning = false;
 
-app.post("/api/scan", async (req, res) => {
+app.post("/api/scan", claudeRateLimit, async (req, res) => {
   if (scanning) return res.status(409).json({ error: "a scan is already running" });
   scanning = true;
   try {
     res.json(await runScan());
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: err.message });
+    // M-4: Don't leak internal error details in production
+    res.status(500).json({ error: isProd ? "Scan failed" : err.message });
   } finally {
     scanning = false;
   }

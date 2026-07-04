@@ -33,12 +33,15 @@ const PROMPTS = {
   tailor: (base) =>
     base +
     "You are an expert resume writer. Given the candidate's master structured resume (in CANDIDATE PROFILE) and the job description, rewrite and select the most relevant bullets for this specific role. Output MUST match the provided JSON schema. Ensure the tailored resume highlights relevant skills and experiences. DO NOT invent facts.",
+  outreach: (base) =>
+    base +
+    "Write a high-converting recruiter cold email or LinkedIn message (under 140 words) for this candidate reaching out about this specific role. Professional, punchy, highlight 2 real overlaps between candidate profile and JD. End with a polite request for a 10-minute chat or recruiter review. Plain text only.",
 };
 
 export const KINDS = Object.keys(PROMPTS);
 
 // Rough output-token guesses per kind, for the pre-spend cost estimate only.
-const OUTPUT_ESTIMATE = { cover: 500, fit: 750, prep: 900, tailor: 1500 };
+const OUTPUT_ESTIMATE = { cover: 500, fit: 750, prep: 900, tailor: 1500, outreach: 350 };
 
 export const RESUME_SCHEMA = {
   type: "object",
@@ -289,4 +292,102 @@ ${job.jd || "(not provided)"}`;
   });
   logUsage(model, "chat", response.usage);
   return firstText(response);
+}
+
+const SEARCH_STRATEGY_SCHEMA = {
+  type: "object",
+  properties: {
+    targetCompanies: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          name: { type: "string" },
+          ats: { type: "string", enum: ["greenhouse", "lever", "ashby"] },
+          slug: { type: "string" },
+          reason: { type: "string" },
+        },
+        required: ["name", "ats", "slug", "reason"],
+        additionalProperties: false,
+      },
+    },
+    titleKeywords: { type: "array", items: { type: "string" } },
+    searchFocus: { type: "string" },
+  },
+  required: ["targetCompanies", "titleKeywords", "searchFocus"],
+  additionalProperties: false,
+};
+
+export async function planAiSearch(userQuery, profileText) {
+  const model = genModel();
+  const prompt = `You are an AI job hunter agent. Analyze the candidate's profile and user query (if provided).
+Formulate an active job discovery strategy by identifying real-world companies that use Greenhouse, Lever, or Ashby ATS and hire for these skills.
+
+CANDIDATE PROFILE:
+${profileText || "(no profile text)"}
+
+USER SEARCH REQUEST:
+${userQuery || "Find the best matching software/engineering jobs for my profile"}
+
+Provide 12 to 20 target companies with accurate ATS identifiers:
+- ats: MUST be 'greenhouse', 'lever', or 'ashby'
+- slug: exact board identifier slug used in URLs (e.g. 'stripe', 'anthropic', 'anduril', 'openai', 'palantir', 'databricks', 'scaleapi', 'snowflake', 'rampart', 'astranis', 'shieldai', 'robinhood', 'figma', 'notion', 'linear')
+- titleKeywords: 4 to 8 position keywords (e.g. 'intern', 'systems', 'embedded', 'full stack', 'co-op', 'software')
+- searchFocus: 1 sentence summary of the AI search strategy`;
+
+  const response = await client.messages.create({
+    model,
+    max_tokens: 2000,
+    output_config: { format: { type: "json_schema", schema: SEARCH_STRATEGY_SCHEMA } },
+    messages: [{ role: "user", content: prompt }],
+  });
+  logUsage(model, "search_plan", response.usage);
+  return JSON.parse(firstText(response) || '{"targetCompanies":[],"titleKeywords":[],"searchFocus":""}');
+}
+
+const RECOMMEND_COMPANIES_SCHEMA = {
+  type: "object",
+  properties: {
+    companies: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          name: { type: "string" },
+          ats: { type: "string", enum: ["greenhouse", "lever", "ashby"] },
+          slug: { type: "string" },
+          industry: { type: "string" },
+          reason: { type: "string" },
+        },
+        required: ["name", "ats", "slug", "industry", "reason"],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ["companies"],
+  additionalProperties: false,
+};
+
+export async function recommendCompanies(profileText) {
+  const model = genModel();
+  const prompt = `Analyze the candidate profile and recommend 12 high-fit target companies that actively hire in their domain and use Greenhouse, Lever, or Ashby ATS.
+
+CANDIDATE PROFILE:
+${profileText || "(no profile text)"}
+
+Return 12 companies with exact board slugs:
+- ats: 'greenhouse', 'lever', or 'ashby'
+- slug: board identifier from URL (e.g. 'anthropic', 'anduril', 'relativity', 'scaleapi', 'palantir', 'spacex', 'astranis')
+- industry: e.g. 'Defense Tech', 'AI Research', 'Space & Satellite', 'SaaS', etc.
+- reason: brief 1-sentence fit explanation for this candidate`;
+
+  const response = await client.messages.create({
+    model,
+    max_tokens: 2000,
+    output_config: { format: { type: "json_schema", schema: RECOMMEND_COMPANIES_SCHEMA } },
+    messages: [{ role: "user", content: prompt }],
+  });
+  logUsage(model, "recommend_companies", response.usage);
+  const parsed = JSON.parse(firstText(response) || '{"companies":[]}');
+  return parsed.companies || [];
 }
