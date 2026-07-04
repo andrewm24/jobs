@@ -230,7 +230,7 @@ function Inbox({ postings, scanBusy, scanSummary, onScan, onAccept, onDismiss })
 }
 
 /* ---------------- Sources ---------------- */
-function Sources({ companies, settings, onAddCompany, onToggleCompany, onDeleteCompany, onSaveSettings }) {
+function Sources({ companies, settings, models = [], onAddCompany, onToggleCompany, onDeleteCompany, onSaveSettings }) {
   const [name, setName] = useState("");
   const [ats, setAts] = useState("greenhouse");
   const [slug, setSlug] = useState("");
@@ -298,6 +298,22 @@ function Sources({ companies, settings, onAddCompany, onToggleCompany, onDeleteC
         <input className="jo-input" value={local.min_score ?? ""} onChange={set("min_score")} placeholder="6" />
         <label className="jo-label">GitHub list lookback (days)</label>
         <input className="jo-input" value={local.github_days ?? ""} onChange={set("github_days")} placeholder="14" />
+        <label className="jo-label">Max postings scored per scan</label>
+        <input className="jo-input" value={local.score_limit ?? ""} onChange={set("score_limit")} placeholder="40" />
+        <div className="jo-row" style={{ marginTop: 0, gap: 16 }}>
+          <div style={{ flex: 1, minWidth: 200 }}>
+            <label className="jo-label">Generation model (cover / fit / prep / tailor / chat)</label>
+            <select className="jo-input" value={local.gen_model ?? ""} onChange={set("gen_model")}>
+              {models.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+            </select>
+          </div>
+          <div style={{ flex: 1, minWidth: 200 }}>
+            <label className="jo-label">Fit-scoring model (runs per posting — keep cheap)</label>
+            <select className="jo-input" value={local.scoring_model ?? ""} onChange={set("scoring_model")}>
+              {models.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+            </select>
+          </div>
+        </div>
         <div className="jo-row" style={{ alignItems: "center" }}>
           <button className="jo-btn" onClick={save}>Save Settings</button>
           {flash && <span className="jo-saved-flash">✓ Saved</span>}
@@ -308,11 +324,20 @@ function Sources({ companies, settings, onAddCompany, onToggleCompany, onDeleteC
 }
 
 /* ---------------- Job Detail ---------------- */
-function JobDetail({ job, profile, onUpdate, onDelete, onBack }) {
+function JobDetail({ job, profile, rates, genModel, onUpdate, onDelete, onBack }) {
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [chatBusy, setChatBusy] = useState(false);
   const [chatMsg, setChatMsg] = useState("");
+
+  // Rough, free client-side estimate (chars/4) so you see cost before spending.
+  const estCost = (kind) => {
+    const rate = rates?.[genModel] || rates?.["claude-opus-4-8"] || { in: 5, out: 25 };
+    const profileChars = (profile?.text?.length || 0) + JSON.stringify(profile?.json_data || {}).length;
+    const inTok = (profileChars + (job.jd?.length || 0) + 400) / 4;
+    const outTok = { cover: 500, fit: 750, prep: 900, tailor: 1500 }[kind] || 700;
+    return (inTok * rate.in + outTok * rate.out) / 1e6;
+  };
 
   const handleChat = async () => {
     if (!chatMsg.trim()) return;
@@ -423,7 +448,25 @@ function JobDetail({ job, profile, onUpdate, onDelete, onBack }) {
             </button>
           )}
         </div>
+        <div className="jo-note">
+          Est. per run (approx): {outputs.map((o) => `${o.key} ~$${estCost(o.key).toFixed(3)}`).join(" · ")}
+          {genModel ? ` · model ${genModel}` : ""}
+        </div>
         {error && <div className="jo-error">{error}</div>}
+
+        {job.ai?.applyReport && (
+          <div style={{ marginTop: 12 }}>
+            <div className="jo-output-title" style={{ color: "var(--steel)" }}>Last apply-assist run · {job.ai.applyReport.ats}</div>
+            <div className="jo-output" style={{ borderLeftColor: "var(--steel)" }}>
+              Filled {job.ai.applyReport.filled.length} field(s){job.ai.applyReport.uploaded.length ? `, attached resume to ${job.ai.applyReport.uploaded.length} upload(s)` : ""}.
+              {job.ai.applyReport.filled.length > 0 && (
+                <div style={{ marginTop: 6, fontSize: 12 }}>{job.ai.applyReport.filled.map((f) => f.label).join(" · ")}</div>
+              )}
+              {job.ai.applyReport.skipped.map((s, i) => <div key={i} className="jo-note">• {s}</div>)}
+              {job.ai.applyReport.errors.map((e, i) => <div key={i} className="jo-error" style={{ fontSize: 12 }}>• {e}</div>)}
+            </div>
+          </div>
+        )}
 
         {outputs.map((o) =>
           job.ai && job.ai[o.key] ? (
@@ -505,48 +548,95 @@ function AddJob({ onAdd }) {
 }
 
 /* ---------------- Analytics ---------------- */
-function Analytics({ jobs }) {
-  const appliedJobs = jobs.filter(j => j.status !== "Saved");
-  const totalApplied = appliedJobs.length;
-  
-  const responses = appliedJobs.filter(j => ["Screen", "Interview", "Offer", "Rejected"].includes(j.status));
-  const totalResponses = responses.length;
-  const responseRate = totalApplied ? Math.round((totalResponses / totalApplied) * 100) : 0;
-  
-  const interviews = appliedJobs.filter(j => ["Screen", "Interview", "Offer"].includes(j.status));
-  const totalInterviews = interviews.length;
-  const interviewRate = totalApplied ? Math.round((totalInterviews / totalApplied) * 100) : 0;
+const metric = (n, label, sub, color) => (
+  <div style={{ flex: 1, minWidth: 160, padding: 16, background: "var(--paper)", border: "1px solid var(--line)" }}>
+    <div style={{ fontSize: 32, fontWeight: 700, fontFamily: "'Space Grotesk', sans-serif", color }}>{n}</div>
+    <div style={{ fontSize: 12, color: "var(--ink-soft)", textTransform: "uppercase", letterSpacing: "0.1em" }}>{label}</div>
+    {sub && <div className="jo-note">{sub}</div>}
+  </div>
+);
 
-  const offers = appliedJobs.filter(j => j.status === "Offer");
-  const totalOffers = offers.length;
-  const offerRate = totalApplied ? Math.round((totalOffers / totalApplied) * 100) : 0;
+function Analytics() {
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState("");
+  useEffect(() => {
+    api.getAnalytics().then(setData).catch((e) => setErr(e.message));
+  }, []);
+
+  if (err) return <div className="jo-card"><div className="jo-error">Couldn't load analytics: {err}</div></div>;
+  if (!data) return <div className="jo-card">Loading analytics…</div>;
+
+  const { funnel, rates, medianResponseDays, timeSeries, bySource, spend } = data;
+  const money = (n) => `$${(n ?? 0).toFixed(2)}`;
+  const maxWeek = Math.max(1, ...timeSeries.map((w) => w.applied));
 
   return (
     <div>
       <div className="jo-card">
-        <div className="jo-output-title">Funnel Metrics</div>
-        <p className="jo-note">Conversion rates across your application pipeline.</p>
-        
-        <div style={{ display: "flex", gap: 16, marginTop: 16, flexWrap: "wrap" }}>
-          <div style={{ flex: 1, minWidth: 200, padding: 16, background: "var(--paper)", border: "1px solid var(--line)" }}>
-            <div style={{ fontSize: 32, fontWeight: 700, fontFamily: "'Space Grotesk', sans-serif" }}>{totalApplied}</div>
-            <div style={{ fontSize: 12, color: "var(--ink-soft)", textTransform: "uppercase", letterSpacing: "0.1em" }}>Total Applications</div>
+        <div className="jo-output-title">Funnel</div>
+        <p className="jo-note">Based on timestamped stage changes — moves through your pipeline over time.</p>
+        <div style={{ display: "flex", gap: 12, marginTop: 16, flexWrap: "wrap" }}>
+          {metric(funnel.applied, "Applications", null, "var(--ink)")}
+          {metric(`${rates.response}%`, "Response Rate", `${funnel.responded} heard back`, "var(--steel)")}
+          {metric(`${rates.interview}%`, "Interview Rate", `${funnel.interviewed} screens/interviews`, "var(--orange)")}
+          {metric(`${rates.offer}%`, "Offer Rate", `${funnel.offered} offers`, "var(--green)")}
+          {metric(medianResponseDays == null ? "—" : `${medianResponseDays.toFixed(0)}d`, "Median Time to Response", null, "var(--ink)")}
+        </div>
+      </div>
+
+      <div className="jo-card">
+        <div className="jo-output-title">Applications per week</div>
+        {timeSeries.length === 0 ? (
+          <p className="jo-note">No applications yet. Move a job past “Saved” to start tracking.</p>
+        ) : (
+          <div style={{ display: "flex", gap: 6, alignItems: "flex-end", height: 140, marginTop: 16 }}>
+            {timeSeries.map((w) => (
+              <div key={w.week} style={{ flex: 1, textAlign: "center", minWidth: 24 }}>
+                <div title={`${w.applied} applied, ${w.responded} responded`}
+                  style={{ height: `${(w.applied / maxWeek) * 110}px`, background: "var(--orange)", borderRadius: "2px 2px 0 0" }} />
+                <div style={{ fontSize: 9, color: "var(--ink-soft)", marginTop: 4, fontFamily: "'IBM Plex Mono', monospace" }}>{w.week.slice(5)}</div>
+              </div>
+            ))}
           </div>
-          <div style={{ flex: 1, minWidth: 200, padding: 16, background: "var(--paper)", border: "1px solid var(--line)" }}>
-            <div style={{ fontSize: 32, fontWeight: 700, fontFamily: "'Space Grotesk', sans-serif", color: "var(--steel)" }}>{responseRate}%</div>
-            <div style={{ fontSize: 12, color: "var(--ink-soft)", textTransform: "uppercase", letterSpacing: "0.1em" }}>Response Rate</div>
-            <div className="jo-note">{totalResponses} heard back</div>
-          </div>
-          <div style={{ flex: 1, minWidth: 200, padding: 16, background: "var(--paper)", border: "1px solid var(--line)" }}>
-            <div style={{ fontSize: 32, fontWeight: 700, fontFamily: "'Space Grotesk', sans-serif", color: "var(--orange)" }}>{interviewRate}%</div>
-            <div style={{ fontSize: 12, color: "var(--ink-soft)", textTransform: "uppercase", letterSpacing: "0.1em" }}>Interview Rate</div>
-            <div className="jo-note">{totalInterviews} screens/interviews</div>
-          </div>
-          <div style={{ flex: 1, minWidth: 200, padding: 16, background: "var(--paper)", border: "1px solid var(--line)" }}>
-            <div style={{ fontSize: 32, fontWeight: 700, fontFamily: "'Space Grotesk', sans-serif", color: "var(--green)" }}>{offerRate}%</div>
-            <div style={{ fontSize: 12, color: "var(--ink-soft)", textTransform: "uppercase", letterSpacing: "0.1em" }}>Offer Rate</div>
-            <div className="jo-note">{totalOffers} offers</div>
-          </div>
+        )}
+      </div>
+
+      <div className="jo-card">
+        <div className="jo-output-title">Conversion by source</div>
+        {bySource.length === 0 ? (
+          <p className="jo-note">No application sources tracked yet.</p>
+        ) : (
+          <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 12, fontSize: 13 }}>
+            <thead>
+              <tr style={{ textAlign: "left", color: "var(--ink-soft)", fontSize: 11, textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                <th style={{ padding: "6px 8px" }}>Source</th>
+                <th style={{ padding: "6px 8px" }}>Applied</th>
+                <th style={{ padding: "6px 8px" }}>Responded</th>
+                <th style={{ padding: "6px 8px" }}>Offers</th>
+                <th style={{ padding: "6px 8px" }}>Resp. rate</th>
+              </tr>
+            </thead>
+            <tbody>
+              {bySource.map((s) => (
+                <tr key={s.source} style={{ borderTop: "1px solid var(--line)" }}>
+                  <td style={{ padding: "6px 8px" }}>{s.source}</td>
+                  <td style={{ padding: "6px 8px" }}>{s.applied}</td>
+                  <td style={{ padding: "6px 8px" }}>{s.responded}</td>
+                  <td style={{ padding: "6px 8px" }}>{s.offered}</td>
+                  <td style={{ padding: "6px 8px" }}>{s.applied ? Math.round((s.responded / s.applied) * 100) : 0}%</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      <div className="jo-card">
+        <div className="jo-output-title">Claude API spend</div>
+        <p className="jo-note">Metered Anthropic API usage (separate from any Claude.ai subscription).</p>
+        <div style={{ display: "flex", gap: 12, marginTop: 16, flexWrap: "wrap" }}>
+          {metric(money(spend.allTime), "All-time spend", `${spend.allTimeTokens.toLocaleString()} tokens`, "var(--ink)")}
+          {metric(money(spend.last24h), "Last 24h", null, "var(--steel)")}
         </div>
       </div>
     </div>
@@ -568,15 +658,19 @@ export default function App() {
   const [scanSummary, setScanSummary] = useState("");
   const [parseBusy, setParseBusy] = useState(false);
   const [parseFlash, setParseFlash] = useState(false);
+  const [config, setConfig] = useState({ models: [], rates: {} });
   const timers = useRef({});
 
   useEffect(() => {
-    Promise.all([api.getProfile(), api.getJobs(), api.getInbox(), api.getCompanies(), api.getSettings()])
-      .then(([profile, jobs, postings, comps, setts]) => {
+    Promise.all([
+      api.getProfile(), api.getJobs(), api.getInbox(), api.getCompanies(), api.getSettings(), api.getConfig(),
+    ])
+      .then(([profile, jobs, postings, comps, setts, cfg]) => {
         setState({ profile, jobs });
         setInbox(postings);
         setCompanies(comps);
         setSettings(setts);
+        setConfig(cfg);
       })
       .catch((e) => setLoadError(e.message))
       .finally(() => setLoaded(true));
@@ -742,14 +836,15 @@ export default function App() {
         </nav>
 
         {openJob ? (
-          <JobDetail job={openJob} profile={state.profile} onUpdate={updateJob} onDelete={deleteJob} onBack={() => setOpenId(null)} />
+          <JobDetail job={openJob} profile={state.profile} rates={config.rates} genModel={settings.gen_model}
+            onUpdate={updateJob} onDelete={deleteJob} onBack={() => setOpenId(null)} />
         ) : tab === "inbox" ? (
           <Inbox postings={inbox} scanBusy={scanBusy} scanSummary={scanSummary}
             onScan={handleScan} onAccept={acceptPosting} onDismiss={dismissPosting} />
         ) : tab === "analytics" ? (
-          <Analytics jobs={state.jobs} />
+          <Analytics />
         ) : tab === "sources" ? (
-          <Sources companies={companies} settings={settings} onAddCompany={addCompany}
+          <Sources companies={companies} settings={settings} models={config.models} onAddCompany={addCompany}
             onToggleCompany={toggleCompany} onDeleteCompany={removeCompany} onSaveSettings={saveSettings} />
         ) : tab === "profile" ? (
           <div className="jo-card">

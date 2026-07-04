@@ -14,7 +14,7 @@ async function getJSON(url) {
 
 const ENTITIES = { "&lt;": "<", "&gt;": ">", "&amp;": "&", "&quot;": '"', "&#39;": "'", "&nbsp;": " " };
 
-function htmlToText(html) {
+export function htmlToText(html) {
   if (!html) return "";
   let text = html.replace(/&(lt|gt|amp|quot|#39|nbsp);/g, (m) => ENTITIES[m] ?? " ");
   text = text

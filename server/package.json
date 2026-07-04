@@ -5,11 +5,15 @@
   "type": "module",
   "scripts": {
     "dev": "node --watch --env-file-if-exists=.env src/index.js",
-    "start": "node --env-file-if-exists=.env src/index.js"
+    "start": "node --env-file-if-exists=.env src/index.js",
+    "apply": "node --env-file-if-exists=.env src/applyCli.js",
+    "test": "node --test"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.70.0",
+    "@react-pdf/renderer": "^4.5.1",
     "express": "^4.21.0",
-    "playwright": "^1.61.1"
+    "playwright": "^1.61.1",
+    "react": "^18.3.1"
   }
 }

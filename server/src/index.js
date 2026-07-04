@@ -5,12 +5,32 @@ import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import Anthropic from "@anthropic-ai/sdk";
 import * as db from "./db.js";
-import { generate, KINDS, parseMasterResume, chat } from "./claude.js";
+import { generate, KINDS, parseMasterResume, chat, estimate } from "./claude.js";
 import { runScan } from "./discovery/scan.js";
 import { runApplyAssist } from "./applyAssist.js";
+import { computeAnalytics } from "./analytics.js";
+import { MODEL_OPTIONS, RATES } from "./costs.js";
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
+
+// Consistent, human-readable errors for any Claude API failure.
+function claudeError(err, res) {
+  if (err instanceof Anthropic.AuthenticationError) {
+    return res.status(502).json({ error: "Claude API auth failed — set ANTHROPIC_API_KEY in server/.env" });
+  }
+  if (err instanceof Anthropic.RateLimitError) {
+    return res.status(502).json({ error: "Claude API rate limited — try again shortly" });
+  }
+  if (err instanceof Anthropic.APIError) {
+    return res.status(502).json({ error: `Claude API error (${err.status}): ${err.message}` });
+  }
+  if (/Could not resolve authentication/i.test(err?.message ?? "")) {
+    return res.status(502).json({ error: "No Anthropic credentials — set ANTHROPIC_API_KEY in server/.env (copy server/.env.example)" });
+  }
+  console.error(err);
+  return res.status(500).json({ error: "Request failed" });
+}
 
 app.get("/api/profile", (req, res) => {
   res.json({ profile: db.getProfile() }); // profile is { text, json_data }
@@ -35,8 +55,7 @@ app.post("/api/profile/parse", async (req, res) => {
     db.setProfile(current.text, json_data);
     res.json({ profile: db.getProfile() });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Parsing failed" });
+    return claudeError(err, res);
   }
 });
 
@@ -96,11 +115,10 @@ app.post("/api/jobs/:id/chat", async (req, res) => {
     
     const ai = { ...job.ai, chat: newHistory };
     db.updateJob(job.id, { ai });
-    
+
     res.json({ chat: newHistory });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Chat failed" });
+    return claudeError(err, res);
   }
 });
 
@@ -120,21 +138,32 @@ app.post("/api/generate", async (req, res) => {
     const updated = db.updateJob(jobId, { ai: { ...job.ai, [kind]: text } });
     res.json({ job: updated });
   } catch (err) {
-    if (err instanceof Anthropic.AuthenticationError) {
-      return res.status(502).json({ error: "Claude API auth failed — set ANTHROPIC_API_KEY in server/.env" });
-    }
-    if (err instanceof Anthropic.RateLimitError) {
-      return res.status(502).json({ error: "Claude API rate limited — try again shortly" });
-    }
-    if (err instanceof Anthropic.APIError) {
-      return res.status(502).json({ error: `Claude API error (${err.status}): ${err.message}` });
-    }
-    if (/Could not resolve authentication/i.test(err?.message ?? "")) {
-      return res.status(502).json({ error: "No Anthropic credentials — set ANTHROPIC_API_KEY in server/.env (copy server/.env.example)" });
-    }
-    console.error(err);
-    res.status(500).json({ error: "Generation failed" });
+    return claudeError(err, res);
   }
+});
+
+app.post("/api/estimate", async (req, res) => {
+  const { jobId, kind } = req.body ?? {};
+  if (!KINDS.includes(kind)) {
+    return res.status(400).json({ error: `kind must be one of: ${KINDS.join(", ")}` });
+  }
+  const job = db.getJob(jobId);
+  if (!job) return res.status(404).json({ error: "job not found" });
+  const profile = db.getProfile();
+  if (!profile.text.trim()) return res.status(400).json({ error: "Add your profile first." });
+  try {
+    res.json(await estimate(kind, profile, job));
+  } catch (err) {
+    return claudeError(err, res);
+  }
+});
+
+app.get("/api/config", (req, res) => {
+  res.json({ models: MODEL_OPTIONS, rates: RATES });
+});
+
+app.get("/api/analytics", (req, res) => {
+  res.json(computeAnalytics());
 });
 
 /* ---------------- discovery: companies, settings, scan, inbox ---------------- */
@@ -147,6 +176,9 @@ app.post("/api/companies", (req, res) => {
   const { name, ats, slug } = req.body ?? {};
   if (!name?.trim() || !slug?.trim() || !["greenhouse", "lever", "ashby"].includes(ats)) {
     return res.status(400).json({ error: "name, slug, and ats (greenhouse|lever|ashby) required" });
+  }
+  if (!/^[A-Za-z0-9._-]+$/.test(slug.trim())) {
+    return res.status(400).json({ error: "slug must be the board identifier from the URL — letters, numbers, . _ - only (no spaces or full URL)" });
   }
   res.status(201).json({ company: db.addCompany({ name, ats, slug }) });
 });
@@ -166,7 +198,23 @@ app.get("/api/settings", (req, res) => {
 });
 
 app.put("/api/settings", (req, res) => {
-  res.json({ settings: db.setSettings(req.body?.settings ?? {}) });
+  const patch = req.body?.settings ?? {};
+  const modelIds = MODEL_OPTIONS.map((m) => m.id);
+  const numeric = { min_score: [0, 10], github_days: [1, 365], score_limit: [0, 500] };
+  for (const [key, [lo, hi]] of Object.entries(numeric)) {
+    if (key in patch) {
+      const n = Number(patch[key]);
+      if (!Number.isFinite(n) || n < lo || n > hi) {
+        return res.status(400).json({ error: `${key} must be a number between ${lo} and ${hi}` });
+      }
+    }
+  }
+  for (const key of ["gen_model", "scoring_model"]) {
+    if (key in patch && !modelIds.includes(patch[key])) {
+      return res.status(400).json({ error: `${key} must be one of: ${modelIds.join(", ")}` });
+    }
+  }
+  res.json({ settings: db.setSettings(patch) });
 });
 
 let scanning = false;
@@ -202,6 +250,7 @@ app.post("/api/inbox/:id/accept", (req, res) => {
     status: "Saved",
     created: new Date().toISOString(),
     ai: {},
+    source: posting.source || "inbox",
   });
   db.setPostingState(posting.id, "accepted");
   res.json({ job });

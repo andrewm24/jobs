@@ -43,6 +43,10 @@ export const api = {
       (d) => d.settings
     ),
   scan: () => request("/api/scan", { method: "POST" }),
+  estimate: (jobId, kind) =>
+    request("/api/estimate", { method: "POST", body: JSON.stringify({ jobId, kind }) }),
+  getConfig: () => request("/api/config"),
+  getAnalytics: () => request("/api/analytics"),
   getInbox: () => request("/api/inbox").then((d) => d.postings),
   acceptPosting: (id) =>
     request(`/api/inbox/${id}/accept`, { method: "POST" }).then((d) => d.job),

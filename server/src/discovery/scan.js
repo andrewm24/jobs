@@ -4,12 +4,13 @@ import { scoreFit } from "../claude.js";
 import { fetchCompanyPostings } from "./ats.js";
 import { fetchGithubListings } from "./github.js";
 
-const SCORE_LIMIT = Math.max(0, Number(process.env.SCORE_LIMIT ?? 40));
 const SCORE_CONCURRENCY = 4;
 
-const norm = (s) => (s ?? "").toLowerCase().replace(/\s+/g, " ").trim();
+export const norm = (s) => (s ?? "").toLowerCase().replace(/\s+/g, " ").trim();
 
-function dedupeHash(p) {
+const jobKey = (company, title) => `${norm(company)}|${norm(title)}`;
+
+export function dedupeHash(p) {
   return createHash("sha256")
     .update(`${norm(p.company)}|${norm(p.title)}|${norm(p.location)}`)
     .digest("hex")
@@ -22,7 +23,7 @@ const csv = (s) =>
     .map((k) => k.trim().toLowerCase())
     .filter(Boolean);
 
-function prefilter(postings, settings) {
+export function prefilter(postings, settings) {
   const include = csv(settings.include_keywords);
   const exclude = csv(settings.exclude_keywords);
   const locations = csv(settings.locations);
@@ -46,7 +47,8 @@ async function scoreNewPostings(settings, results) {
     return;
   }
   const minScore = Number(settings.min_score) || 6;
-  const queue = db.unscoredPostings(SCORE_LIMIT);
+  const limit = Math.max(0, Number(settings.score_limit) || Number(process.env.SCORE_LIMIT) || 40);
+  const queue = db.unscoredPostings(limit);
   for (let i = 0; i < queue.length; i += SCORE_CONCURRENCY) {
     const chunk = queue.slice(i, i + SCORE_CONCURRENCY);
     const outcomes = await Promise.allSettled(
@@ -93,7 +95,10 @@ export async function runScan() {
   }
 
   results.fetched = postings.length;
+  // Skip postings that already exist as pipeline jobs (accepted or added manually).
+  const jobKeys = new Set(db.listJobs().map((j) => jobKey(j.company, j.role)));
   for (const p of prefilter(postings, settings)) {
+    if (jobKeys.has(jobKey(p.company, p.title))) continue;
     if (db.insertPosting({ ...p, id: dedupeHash(p) })) results.new++;
   }
 

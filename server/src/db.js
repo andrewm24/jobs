@@ -4,10 +4,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const dataDir = path.join(here, "..", "data");
-mkdirSync(dataDir, { recursive: true });
+// JOBOPS_DB_PATH lets tests (and Docker volumes) point at a specific database file.
+const dbPath = process.env.JOBOPS_DB_PATH || path.join(here, "..", "data", "jobops.db");
+mkdirSync(path.dirname(dbPath), { recursive: true });
 
-const db = new DatabaseSync(path.join(dataDir, "jobops.db"));
+const db = new DatabaseSync(dbPath);
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS profile (
@@ -24,7 +25,8 @@ db.exec(`
     notes TEXT DEFAULT '',
     status TEXT NOT NULL DEFAULT 'Saved',
     created TEXT NOT NULL,
-    ai TEXT NOT NULL DEFAULT '{}'
+    ai TEXT NOT NULL DEFAULT '{}',
+    source TEXT DEFAULT ''
   );
   CREATE TABLE IF NOT EXISTS companies (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -54,17 +56,67 @@ db.exec(`
     question TEXT PRIMARY KEY,
     answer TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id TEXT NOT NULL,
+    type TEXT NOT NULL,
+    from_stage TEXT,
+    to_stage TEXT,
+    at TEXT NOT NULL,
+    meta TEXT
+  );
+  CREATE TABLE IF NOT EXISTS usage_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at TEXT NOT NULL,
+    model TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cost REAL NOT NULL DEFAULT 0
+  );
 `);
 
 // Migrate databases created before the structured-resume column existed.
 // Must run before seeding, since the seed row relies on the column's default.
-try {
-  db.exec("ALTER TABLE profile ADD COLUMN json_data TEXT NOT NULL DEFAULT '{}'");
-} catch (e) {
-  // Column already exists — nothing to migrate.
+for (const stmt of [
+  "ALTER TABLE profile ADD COLUMN json_data TEXT NOT NULL DEFAULT '{}'",
+  "ALTER TABLE jobs ADD COLUMN source TEXT DEFAULT ''",
+]) {
+  try {
+    db.exec(stmt);
+  } catch (e) {
+    // Column already exists — nothing to migrate.
+  }
 }
 
 db.exec("INSERT OR IGNORE INTO profile (id, text) VALUES (1, '')");
+
+/* ---------------- events + usage (analytics, cost) ---------------- */
+
+export function recordEvent(jobId, type, fromStage, toStage, meta) {
+  db.prepare(
+    "INSERT INTO events (job_id, type, from_stage, to_stage, at, meta) VALUES (?, ?, ?, ?, ?, ?)"
+  ).run(jobId, type, fromStage ?? null, toStage ?? null, new Date().toISOString(), meta ? JSON.stringify(meta) : null);
+}
+
+export function listEvents() {
+  return db.prepare("SELECT * FROM events ORDER BY at").all();
+}
+
+export function logUsage({ model, kind, input_tokens = 0, output_tokens = 0, cost = 0 }) {
+  db.prepare(
+    "INSERT INTO usage_log (at, model, kind, input_tokens, output_tokens, cost) VALUES (?, ?, ?, ?, ?, ?)"
+  ).run(new Date().toISOString(), model, kind, input_tokens, output_tokens, cost);
+}
+
+export function getSpend() {
+  const all = db
+    .prepare("SELECT COALESCE(SUM(cost), 0) c, COALESCE(SUM(input_tokens + output_tokens), 0) t FROM usage_log")
+    .get();
+  const since = new Date(Date.now() - 86_400_000).toISOString();
+  const day = db.prepare("SELECT COALESCE(SUM(cost), 0) c FROM usage_log WHERE at >= ?").get(since);
+  return { allTime: all.c, allTimeTokens: all.t, last24h: day.c };
+}
 
 const rowToJob = (row) => row && { ...row, ai: JSON.parse(row.ai) };
 
@@ -100,9 +152,10 @@ export function getJob(id) {
 }
 
 export function insertJob(job) {
+  const status = job.status ?? "Saved";
   db.prepare(
-    `INSERT INTO jobs (id, company, role, link, jd, notes, status, created, ai)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO jobs (id, company, role, link, jd, notes, status, created, ai, source)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     job.id,
     job.company,
@@ -110,10 +163,12 @@ export function insertJob(job) {
     job.link ?? "",
     job.jd ?? "",
     job.notes ?? "",
-    job.status ?? "Saved",
+    status,
     job.created ?? new Date().toISOString(),
-    JSON.stringify(job.ai ?? {})
+    JSON.stringify(job.ai ?? {}),
+    job.source ?? ""
   );
+  recordEvent(job.id, "created", null, status);
   return getJob(job.id);
 }
 
@@ -127,11 +182,15 @@ export function updateJob(id, patch) {
     const value = key === "ai" ? JSON.stringify(patch.ai ?? {}) : patch[key];
     db.prepare(`UPDATE jobs SET ${key} = ? WHERE id = ?`).run(value, id);
   }
+  if ("status" in patch && patch.status !== existing.status) {
+    recordEvent(id, "stage_change", existing.status, patch.status);
+  }
   return getJob(id);
 }
 
 export function deleteJob(id) {
   db.prepare("DELETE FROM jobs WHERE id = ?").run(id);
+  db.prepare("DELETE FROM events WHERE job_id = ?").run(id);
 }
 
 /* ---------------- companies (watchlist) ---------------- */
@@ -167,6 +226,9 @@ const SETTINGS_DEFAULTS = {
   min_score: "6",
   github_days: "14",
   github_repo: "",
+  gen_model: "claude-opus-4-8",
+  scoring_model: "claude-haiku-4-5",
+  score_limit: "40",
 };
 
 export function getSettings() {

@@ -1,0 +1,20 @@
+services:
+  app:
+    build: .
+    ports:
+      - "3001:3001" # web app
+      - "6080:6080" # noVNC — watch/submit apply-assist here
+    environment:
+      # Put your key in a .env file at the repo root (Compose reads it automatically)
+      # or export it in your shell. Unset just means Claude features show a setup hint.
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - CLAUDE_MODEL=${CLAUDE_MODEL:-}
+      - SCORING_MODEL=${SCORING_MODEL:-}
+      - SCAN_INTERVAL_HOURS=${SCAN_INTERVAL_HOURS:-6}
+      - JOBOPS_DB_PATH=/app/server/data/jobops.db
+    volumes:
+      - jobops-data:/app/server/data
+    restart: unless-stopped
+
+volumes:
+  jobops-data:
